@@ -17,8 +17,9 @@
   tezos-protocol-environment-structs
   tezos-micheline
   tezos-context.memory
-  tezos-event-logging)
+  tezos-event-logging lwt.unix repr)
  (flags (:standard -open Tezos_base.TzPervasives -open Tezos_micheline))
+ (preprocess (pps ppx_repr))
  (wrapped false)
  (modules
   Tezos_protocol_environment

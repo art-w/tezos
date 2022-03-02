@@ -33,6 +33,83 @@ let err_implementation_mismatch ~expected ~got =
     expected
     got
 
+module M = struct
+  module C = Tezos_context_memory.Context_binary
+  open Lwt.Syntax
+
+  module Print = struct
+    type step = string [@@deriving repr]
+
+    type value = bytes [@@deriving repr]
+
+    type index = int [@@deriving repr]
+
+    type hash = Context_hash.t
+
+    let hash_t =
+      Repr.(
+        map
+          string
+          (fun _string -> assert false)
+          (fun h -> Context_hash.to_string h))
+
+    type 'a inode = 'a C.Proof.inode = {
+      length : index;
+      proofs : (index * 'a) list;
+    }
+    [@@deriving repr]
+
+    type 'a inode_extender = 'a C.Proof.inode_extender = {
+      length : index;
+      segment : index list;
+      proof : 'a;
+    }
+    [@@deriving repr]
+
+    type tree = C.Proof.tree =
+      | Value of value
+      | Blinded_value of hash
+      | Node of (step * tree) list
+      | Blinded_node of hash
+      | Inode of inode_tree inode
+      | Extender of inode_tree inode_extender
+    [@@deriving repr ~pp]
+
+    and inode_tree = C.Proof.inode_tree =
+      | Blinded_inode of hash
+      | Inode_values of (step * tree) list
+      | Inode_tree of inode_tree inode
+      | Inode_extender of inode_tree inode_extender
+    [@@deriving repr]
+  end
+
+  let main () =
+    let ctxt = C.empty in
+    let index = C.index ctxt in
+    let time = Time.Protocol.of_seconds 0L in
+
+    let* ctxt = C.add ctxt ["zero"] (Bytes.of_string "0") in
+    let* ctxt = C.add ctxt ["one"] (Bytes.of_string "1") in
+    let* h = C.commit ~time ctxt in
+    let* ctxt = C.checkout_exn index h in
+    let* hash =
+      let+ tree_opt = C.find_tree ctxt [] in
+      match tree_opt with Some t -> C.Tree.hash t | None -> assert false
+    in
+    let* (proof, ()) =
+      C.produce_tree_proof index (`Node hash) @@ fun t ->
+      let* _byte_opt = C.Tree.find t ["zero"] in
+      Lwt.return (t, ())
+    in
+    Fmt.epr "%a\n%!" Print.pp_tree proof.state ;
+
+    Lwt.return_unit
+
+  let () =
+    Lwt_main.run (main ()) ;
+    Stdlib.failwith "super"
+end
+
 module Equality_witness : sig
   type (_, _) eq = Refl : ('a, 'a) eq
 
