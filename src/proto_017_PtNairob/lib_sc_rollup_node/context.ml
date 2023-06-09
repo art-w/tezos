@@ -79,6 +79,7 @@ let load : type a. a mode -> string -> a raw_index Lwt.t =
   let open Lwt_syntax in
   let readonly = match mode with Read_only -> true | Read_write -> false in
   let+ repo =
+    Lwt_eio.run_eio @@ fun () ->
     IStore.Repo.v
       (Irmin_pack.config
          ~readonly
@@ -87,11 +88,12 @@ let load : type a. a mode -> string -> a raw_index Lwt.t =
   in
   {path; repo}
 
-let close ctxt = IStore.Repo.close ctxt.repo
+let close ctxt = Lwt_eio.run_eio @@ fun () -> IStore.Repo.close ctxt.repo
 
 let readonly (index : [> `Read] index) = (index :> [`Read] index)
 
 let raw_commit ?(message = "") index tree =
+  Lwt_eio.run_eio @@ fun () ->
   let info = IStore.Info.v ~author:"Tezos" 0L ~message in
   IStore.Commit.v index.repo ~info ~parents:[] tree
 
@@ -102,7 +104,10 @@ let commit ?message ctxt =
 
 let checkout index key =
   let open Lwt_syntax in
-  let* o = IStore.Commit.of_hash index.repo (hash_to_istore_hash key) in
+  let* o =
+    Lwt_eio.run_eio @@ fun () ->
+    IStore.Commit.of_hash index.repo (hash_to_istore_hash key)
+  in
   match o with
   | None -> return_none
   | Some commit ->
@@ -191,13 +196,16 @@ module PVMState = struct
 
   let empty () = IStore.Tree.empty ()
 
-  let find ctxt = IStore.Tree.find_tree ctxt.tree key
+  let find ctxt =
+    Lwt_eio.run_eio @@ fun () -> IStore.Tree.find_tree ctxt.tree key
 
-  let lookup tree path = IStore.Tree.find tree path
+  let lookup tree path = Lwt_eio.run_eio @@ fun () -> IStore.Tree.find tree path
 
   let set ctxt state =
     let open Lwt_syntax in
-    let+ tree = IStore.Tree.add_tree ctxt.tree key state in
+    let+ tree =
+      Lwt_eio.run_eio @@ fun () -> IStore.Tree.add_tree ctxt.tree key state
+    in
     {ctxt with tree}
 end
 
@@ -216,15 +224,17 @@ module Rollup = struct
     let value =
       Data_encoding.Binary.to_bytes_exn Sc_rollup.Address.encoding addr
     in
-    let*! store = IStore.main index.repo in
-    let*! () = IStore.set_exn ~info store path value in
+    let*! store = Lwt_eio.run_eio @@ fun () -> IStore.main index.repo in
+    let*! () =
+      Lwt_eio.run_eio @@ fun () -> IStore.set_exn ~info store path value
+    in
     return_unit
 
   let get_address (index : _ raw_index) =
     let open Lwt_result_syntax in
     protect @@ fun () ->
-    let*! store = IStore.main index.repo in
-    let*! value = IStore.find store path in
+    let*! store = Lwt_eio.run_eio @@ fun () -> IStore.main index.repo in
+    let*! value = Lwt_eio.run_eio @@ fun () -> IStore.find store path in
     return
     @@ Option.map
          (Data_encoding.Binary.of_bytes_exn Sc_rollup.Address.encoding)
@@ -274,15 +284,17 @@ module Version = struct
       IStore.Info.v date
     in
     let value = Data_encoding.Binary.to_bytes_exn encoding version in
-    let*! store = IStore.main index.repo in
-    let*! () = IStore.set_exn ~info store path value in
+    let*! store = Lwt_eio.run_eio @@ fun () -> IStore.main index.repo in
+    let*! () =
+      Lwt_eio.run_eio @@ fun () -> IStore.set_exn ~info store path value
+    in
     return_unit
 
   let get (index : _ index) =
     let open Lwt_result_syntax in
     protect @@ fun () ->
-    let*! store = IStore.main index.repo in
-    let*! value = IStore.find store path in
+    let*! store = Lwt_eio.run_eio @@ fun () -> IStore.main index.repo in
+    let*! value = Lwt_eio.run_eio @@ fun () -> IStore.find store path in
     return @@ Option.map (Data_encoding.Binary.of_bytes_exn encoding) value
 
   let check (index : _ index) =

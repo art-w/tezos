@@ -268,16 +268,20 @@ module V1_migrations = struct
     let store = Irmin_store.Raw_irmin.unsafe v1_store.irmin_store in
     let old_root = Store_v0.Dal_processed_slots.path in
     let new_root = Dal_slots_statuses.path in
-    let* old_tree = Irmin_store.Raw_irmin.find_tree store old_root in
+    let* old_tree =
+      Lwt_eio.run_eio @@ fun () ->
+      Irmin_store.Raw_irmin.find_tree store old_root
+    in
     match old_tree with
     | None -> return_unit
     | Some _ ->
         (* Move the tree in the new key *)
+        Lwt_eio.run_eio @@ fun () ->
         Irmin_store.Raw_irmin.with_tree_exn
           ~info
           store
           new_root
-          (fun _new_tree -> return old_tree)
+          (fun _new_tree -> old_tree)
 
   let final_actions ~storage_dir ~tmp_dir (_v0_store : _ Store_v0.t)
       (v1_store : _ Store_v1.t) =

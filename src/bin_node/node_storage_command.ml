@@ -124,11 +124,13 @@ module Term = struct
       (let open Lwt_result_syntax in
       let* root = root config_file data_dir in
       let*! () =
+        Lwt_eio.run_eio @@ fun () ->
         Tezos_context.Context.Checks.Pack.Integrity_check.run
           ~root
           ~auto_repair
           ~always:false
           ~heads:None
+          ()
       in
       return_unit)
 
@@ -143,7 +145,10 @@ module Term = struct
     Shared_arg.process_command
       (let open Lwt_result_syntax in
       let* root = root config_file data_dir in
-      let*! () = Tezos_context.Context.Checks.Pack.Stat.run ~root in
+      let*! () =
+        Lwt_eio.run_eio @@ fun () ->
+        Tezos_context.Context.Checks.Pack.Stat.run ~root
+      in
       return_unit)
 
   let index_dir_exists context_dir output =
@@ -204,6 +209,7 @@ module Term = struct
             (Store.Block.hash block, Store.Block.level block, context_hash))
       in
       let*! () =
+        Lwt_eio.run_eio @@ fun () ->
         Tezos_context.Context.Checks.Pack.Integrity_check_inodes.run
           ~root:context_dir
           ~heads:(Some [context_hash_str])

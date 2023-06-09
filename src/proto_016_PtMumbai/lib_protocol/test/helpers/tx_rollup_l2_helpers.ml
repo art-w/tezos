@@ -61,17 +61,21 @@ module Irmin_storage :
 
   let get store key =
     let open Lwt_syntax in
-    let* res = Store.Tree.find store (path key) in
+    let* res = Lwt_eio.run_eio @@ fun () -> Store.Tree.find store (path key) in
     return_ok res
 
   let set store key value =
     let open Lwt_syntax in
-    let* store = Store.Tree.add store (path key) value in
+    let* store =
+      Lwt_eio.run_eio @@ fun () -> Store.Tree.add store (path key) value
+    in
     return_ok store
 
   let remove store key =
     let open Lwt_syntax in
-    let* store = Store.Tree.remove store (path key) in
+    let* store =
+      Lwt_eio.run_eio @@ fun () -> Store.Tree.remove store (path key)
+    in
     return_ok store
 
   module Syntax = struct

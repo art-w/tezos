@@ -47,8 +47,10 @@ struct
     @@ protect
     @@ fun () ->
     let readonly = match mode with Read_only -> true | Read_write -> false in
-    let*! repo = Repo.v (Irmin_pack.config ~readonly data_dir) in
-    let*! main = main repo in
+    let*! repo =
+      Lwt_eio.run_eio @@ fun () -> Repo.v (Irmin_pack.config ~readonly data_dir)
+    in
+    let*! main = Lwt_eio.run_eio @@ fun () -> main repo in
     return main
 
   let flush store =
@@ -63,7 +65,7 @@ struct
     trace (Store_errors.Cannot_close_store N.name)
     @@ protect
     @@ fun () ->
-    let*! () = Repo.close (repo store) in
+    let*! () = Lwt_eio.run_eio @@ fun () -> Repo.close (repo store) in
     return_unit
 
   let info message =
@@ -82,7 +84,7 @@ struct
     @@ fun () ->
     let full_path = path_to_string path in
     let info () = info full_path in
-    let*! () = set_exn ~info store path bytes in
+    let*! () = Lwt_eio.run_eio @@ fun () -> set_exn ~info store path bytes in
     return_unit
 
   let get store path =
@@ -90,7 +92,7 @@ struct
     trace (Store_errors.Cannot_read_from_store N.name)
     @@ protect
     @@ fun () ->
-    let*! bytes = get store path in
+    let*! bytes = Lwt_eio.run_eio @@ fun () -> get store path in
     return bytes
 
   let readonly = Fun.id
@@ -100,7 +102,7 @@ struct
     trace (Store_errors.Cannot_read_from_store N.name)
     @@ protect
     @@ fun () ->
-    let*! is_present = mem store path in
+    let*! is_present = Lwt_eio.run_eio @@ fun () -> mem store path in
     return is_present
 
   let find store path =
@@ -108,7 +110,7 @@ struct
     trace (Store_errors.Cannot_read_from_store N.name)
     @@ protect
     @@ fun () ->
-    let*! bytes_opt = find store path in
+    let*! bytes_opt = Lwt_eio.run_eio @@ fun () -> find store path in
     return bytes_opt
 
   module Raw_irmin = struct

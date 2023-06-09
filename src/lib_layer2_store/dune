@@ -6,6 +6,7 @@
  (package tezos-layer2-store)
  (instrumentation (backend bisect_ppx))
  (libraries
+  lwt_eio
   index
   tezos-base
   irmin-pack

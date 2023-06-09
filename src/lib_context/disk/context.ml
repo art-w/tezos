@@ -292,45 +292,39 @@ module Make (Encoding : module type of Tezos_context_encoding.Context) = struct
   let current_predecessor_ops_metadata_hash_key =
     ["predecessor_ops_metadata_hash"]
 
-  let sync index =
-    if index.readonly then Store.reload index.repo ;
-    Lwt.return ()
+  let sync index = if index.readonly then Store.reload index.repo
 
   let exists index key =
-    let open Lwt_syntax in
-    let* () = sync index in
-    let+ o = Store.Commit.of_hash index.repo (Hash.of_context_hash key) in
+    let () = sync index in
+    let o = Store.Commit.of_hash index.repo (Hash.of_context_hash key) in
     Option.is_some o
 
   let checkout index key =
-    let open Lwt_syntax in
-    let* () = sync index in
-    let* o = Store.Commit.of_hash index.repo (Hash.of_context_hash key) in
+    let () = sync index in
+    let o = Store.Commit.of_hash index.repo (Hash.of_context_hash key) in
     match o with
-    | None -> return_none
+    | None -> None
     | Some commit ->
         let tree = Store.Commit.tree commit in
-        return_some {index; tree; parents = [commit]; ops = 0}
+        Some {index; tree; parents = [commit]; ops = 0}
 
   let checkout_exn index key =
-    let open Lwt_syntax in
-    let* o = checkout index key in
-    match o with None -> Lwt.fail Not_found | Some p -> Lwt.return p
+    let o = checkout index key in
+    match o with None -> raise Not_found | Some p -> p
 
   (* unshallow possible 1-st level objects from previous partial
      checkouts ; might be better to pass directly the list of shallow
      objects. *)
   let unshallow context =
-    let open Lwt_syntax in
-    let* children = Store.Tree.list context.tree [] in
+    let children = Store.Tree.list context.tree [] in
     P.Repo.batch context.index.repo (fun x y _ ->
-        List.iter_s
+        List.iter
           (fun (s, k) ->
             match Store.Tree.destruct k with
-            | `Contents _ -> Lwt.return ()
+            | `Contents _ -> ()
             | `Node _ ->
-                let* tree = Store.Tree.get_tree context.tree [s] in
-                let+ _ =
+                let tree = Store.Tree.get_tree context.tree [s] in
+                let _ =
                   Store.save_tree ~clear:true context.index.repo x y tree
                 in
                 ())
@@ -345,13 +339,13 @@ module Make (Encoding : module type of Tezos_context_encoding.Context) = struct
       tzfail (Tezos_context_helpers.Context.Unsupported_context_hash_version v)
 
   let raw_commit ~time ?(message = "") context =
-    let open Lwt_syntax in
+    Lwt_eio.run_eio @@ fun () ->
     let info =
       Info.v ~author:"Tezos" (Time.Protocol.to_seconds time) ~message
     in
     let parents = List.map Store.Commit.key context.parents in
-    let* () = unshallow context in
-    let+ c = Store.Commit.v context.index.repo ~info ~parents context.tree in
+    let () = unshallow context in
+    let c = Store.Commit.v context.index.repo ~info ~parents context.tree in
     Store.Tree.clear context.tree ;
     c
 
@@ -367,24 +361,27 @@ module Make (Encoding : module type of Tezos_context_encoding.Context) = struct
     Hash.to_context_hash (Commit_hash.hash commit)
 
   let commit ~time ?message context =
-    let open Lwt_syntax in
+    let open Lwt.Syntax in
     let+ commit = raw_commit ~time ?message context in
     Hash.to_context_hash (Store.Commit.hash commit)
 
   let gc index context_hash =
-    let open Lwt_syntax in
     let repo = index.repo in
-    let* commit_opt =
+    let commit_opt =
       Store.Commit.of_hash index.repo (Hash.of_context_hash context_hash)
     in
     match commit_opt with
     | None ->
         Fmt.failwith "%a: unknown context hash" Context_hash.pp context_hash
     | Some commit -> (
-        let* () = Events.(emit starting_gc) context_hash in
+        let () =
+          Lwt_eio.run_lwt @@ fun () -> Events.(emit starting_gc) context_hash
+        in
         Logs.info (fun m ->
             m "Launch GC for commit %a@." Context_hash.pp context_hash) ;
-        let finished = function
+        let finished result =
+          Lwt_eio.run_lwt @@ fun () ->
+          match result with
           | Ok (stats : Irmin_pack_unix.Stats.Latest_gc.stats) ->
               let total_duration =
                 Irmin_pack_unix.Stats.Latest_gc.total_duration stats
@@ -398,22 +395,20 @@ module Make (Encoding : module type of Tezos_context_encoding.Context) = struct
           | Error (`Msg err) -> Events.(emit gc_failure) err
         in
         let commit_key = Store.Commit.key commit in
-        let* launch_result = Store.Gc.run ~finished repo commit_key in
+        let launch_result = Store.Gc.run ~finished repo commit_key in
         match launch_result with
-        | Ok _ -> return_unit
+        | Ok _ -> ()
         | Error (`Msg err) ->
-            let* () = Events.(emit gc_launch_failure) err in
-            return_unit)
+            Lwt_eio.run_lwt @@ fun () -> Events.(emit gc_launch_failure) err)
 
   let wait_gc_completion index =
-    let open Lwt_syntax in
-    let* () = sync index in
-    let* r = Store.Gc.wait index.repo in
+    sync index ;
+    let r = Store.Gc.wait index.repo in
     match r with
-    | Ok _stats_opt -> return_unit
+    | Ok _stats_opt -> ()
     | Error (`Msg _msg) ->
         (* Logs will be printed by the [gc] caller. *)
-        return_unit
+        ()
 
   let is_gc_allowed index = Store.Gc.is_allowed index.repo
 
@@ -424,8 +419,7 @@ module Make (Encoding : module type of Tezos_context_encoding.Context) = struct
     Lwt.return_unit
 
   let export_snapshot index context_hash ~path =
-    let open Lwt_syntax in
-    let* commit_opt =
+    let commit_opt =
       Store.Commit.of_hash index.repo (Hash.of_context_hash context_hash)
     in
     match commit_opt with
@@ -489,6 +483,7 @@ module Make (Encoding : module type of Tezos_context_encoding.Context) = struct
   let flush context =
     let open Lwt_syntax in
     let+ _ =
+      Lwt_eio.run_eio @@ fun () ->
       P.Repo.batch context.index.repo (fun x y _ ->
           Store.save_tree ~clear:true context.index.repo x y context.tree)
     in
@@ -517,27 +512,28 @@ module Make (Encoding : module type of Tezos_context_encoding.Context) = struct
   let merkle_hash_to_string = Irmin.Type.to_string Store.Hash.t
 
   let rec tree_to_raw_context tree =
-    let open Lwt_syntax in
     match Store.Tree.destruct tree with
     | `Contents (v, _) ->
-        let+ v = Store.Tree.Contents.force_exn v in
+        let v = Store.Tree.Contents.force_exn v in
         Proof.Key v
     | `Node _ ->
-        let* kvs = Store.Tree.list tree [] in
+        let kvs = Store.Tree.list tree [] in
         let f acc (key, _) =
           (* get_tree is safe, because we iterate over keys *)
-          let* tree = Store.Tree.get_tree tree [key] in
-          let+ sub_raw_context = tree_to_raw_context tree in
+          let tree = Store.Tree.get_tree tree [key] in
+          let sub_raw_context = tree_to_raw_context tree in
           String.Map.add key sub_raw_context acc
         in
-        let+ res = List.fold_left_s f String.Map.empty kvs in
+        let res = List.fold_left f String.Map.empty kvs in
         Proof.Dir res
 
   let tree_to_memory_tree (tree : tree) :
       Tezos_context_memory.Context.tree Lwt.t =
     let contents path bytes acc =
+      Lwt_eio.run_lwt @@ fun () ->
       Tezos_context_memory.Context.Tree.add acc path bytes
     in
+    Lwt_eio.run_eio @@ fun () ->
     Store.Tree.fold
       ~force:`True
       ~order:`Undefined
@@ -564,10 +560,9 @@ module Make (Encoding : module type of Tezos_context_encoding.Context) = struct
     Proof.Hash (merkle_hash_kind, hash_str)
 
   let merkle_tree t leaf_kind key =
-    let open Lwt_syntax in
-    let* subtree_opt = Store.Tree.find_tree t.tree (data_key []) in
+    let subtree_opt = Store.Tree.find_tree t.tree (data_key []) in
     match subtree_opt with
-    | None -> Lwt.return String.Map.empty
+    | None -> String.Map.empty
     | Some subtree ->
         let key_to_string k = String.concat ";" k in
         let rec key_to_merkle_tree t target =
@@ -583,41 +578,41 @@ module Make (Encoding : module type of Tezos_context_encoding.Context) = struct
           | _, [hd] ->
               let finally key =
                 (* get_tree is safe because we iterate on keys *)
-                let* tree = Store.Tree.get_tree t [key] in
+                let tree = Store.Tree.get_tree t [key] in
                 if key = hd then
                   (* on the target path: the final leaf *)
                   match leaf_kind with
-                  | Proof.Hole -> Lwt.return @@ merkle_hash tree
+                  | Proof.Hole -> merkle_hash tree
                   | Proof.Raw_context ->
-                      let+ raw_context = tree_to_raw_context tree in
+                      let raw_context = tree_to_raw_context tree in
                       Proof.Data raw_context
                 else
                   (* a sibling of the target path: return a hash *)
-                  Lwt.return @@ merkle_hash tree
+                  merkle_hash tree
               in
-              let* l = Store.Tree.list t [] in
-              List.fold_left_s
+              let l = Store.Tree.list t [] in
+              List.fold_left
                 (fun acc (key, _) ->
-                  let+ v = finally key in
+                  let v = finally key in
                   String.Map.add key v acc)
                 String.Map.empty
                 l
           | `Node _, target_hd :: target_tl ->
               let continue key =
                 (* get_tree is safe because we iterate on keys *)
-                let* tree = Store.Tree.get_tree t [key] in
+                let tree = Store.Tree.get_tree t [key] in
                 if key = target_hd then
                   (* on the target path: recurse *)
-                  let+ sub = key_to_merkle_tree tree target_tl in
+                  let sub = key_to_merkle_tree tree target_tl in
                   Proof.Continue sub
                 else
                   (* a sibling of the target path: return a hash *)
-                  Lwt.return @@ merkle_hash tree
+                  merkle_hash tree
               in
-              let* l = Store.Tree.list t [] in
-              List.fold_left_s
+              let l = Store.Tree.list t [] in
+              List.fold_left
                 (fun acc (key, _) ->
-                  let+ atom = continue key in
+                  let atom = continue key in
                   String.Map.add key atom acc)
                 String.Map.empty
                 l
@@ -802,6 +797,7 @@ module Make (Encoding : module type of Tezos_context_encoding.Context) = struct
       let* () =
         Events.(emit init_context (readonly, index_log_size, lru_size))
       in
+      Lwt_eio.run_eio @@ fun () ->
       Store.Repo.v
         (Irmin_pack.config
            ~readonly
@@ -833,7 +829,10 @@ module Make (Encoding : module type of Tezos_context_encoding.Context) = struct
     let*! ctxt = add_protocol ctxt protocol in
     let*! ctxt = add_test_chain ctxt Not_running in
     let*! commit = raw_commit ~time ~message:"Genesis" ctxt in
-    let*! () = Store.Branch.set index.repo (get_branch chain_id) commit in
+    let*! () =
+      Lwt_eio.run_eio @@ fun () ->
+      Store.Branch.set index.repo (get_branch chain_id) commit
+    in
     return (Hash.to_context_hash (Store.Commit.hash commit))
 
   let compute_testchain_chain_id genesis =
@@ -874,7 +873,10 @@ module Make (Encoding : module type of Tezos_context_encoding.Context) = struct
       }
     in
     let branch = get_branch chain_id in
-    let+ () = Store.Branch.set ctxt.index.repo branch commit in
+    let+ () =
+      Lwt_eio.run_eio @@ fun () ->
+      Store.Branch.set ctxt.index.repo branch commit
+    in
     genesis_header
 
   let clear_test_chain index chain_id =
@@ -883,16 +885,14 @@ module Make (Encoding : module type of Tezos_context_encoding.Context) = struct
     Store.Branch.remove index.repo branch
 
   let set_head index chain_id commit =
-    let open Lwt_syntax in
     let branch = get_branch chain_id in
-    let* o = Store.Commit.of_hash index.repo (Hash.of_context_hash commit) in
+    let o = Store.Commit.of_hash index.repo (Hash.of_context_hash commit) in
     match o with
     | None -> assert false
     | Some commit -> Store.Branch.set index.repo branch commit
 
   let set_master index commit =
-    let open Lwt_syntax in
-    let* o = Store.Commit.of_hash index.repo (Hash.of_context_hash commit) in
+    let o = Store.Commit.of_hash index.repo (Hash.of_context_hash commit) in
     match o with
     | None -> assert false
     | Some commit -> Store.Branch.set index.repo Store.Branch.main commit
@@ -967,7 +967,6 @@ module Make (Encoding : module type of Tezos_context_encoding.Context) = struct
     let checkout idx h = checkout idx h
 
     let set_context ~info ~parents ctxt context_hash =
-      let open Lwt_syntax in
       let parents = List.sort Context_hash.compare parents in
       let parents =
         (* All commit objects in the context are indexed, so it's safe to build a
@@ -977,7 +976,7 @@ module Make (Encoding : module type of Tezos_context_encoding.Context) = struct
             Hash.of_context_hash h |> Irmin_pack_unix.Pack_key.v_indexed)
           parents
       in
-      let+ c = Store.Commit.v ctxt.index.repo ~info ~parents ctxt.tree in
+      let c = Store.Commit.v ctxt.index.repo ~info ~parents ctxt.tree in
       let h = Store.Commit.hash c in
       Context_hash.equal context_hash (Hash.to_context_hash h)
 
@@ -1086,8 +1085,7 @@ module Make (Encoding : module type of Tezos_context_encoding.Context) = struct
       Snapshot.Import.v ?on_disk idx.repo
 
     let save_inode idx import snapshot =
-      let open Lwt_syntax in
-      let* key = Snapshot.Import.save_elt import snapshot in
+      let key = Snapshot.Import.save_elt import snapshot in
       Store.Tree.of_key idx.repo (`Node key)
 
     let close_import import index = Snapshot.Import.close import index.repo
@@ -1097,21 +1095,19 @@ module Make (Encoding : module type of Tezos_context_encoding.Context) = struct
     let update_context context tree = {context with tree}
 
     let add_hash (Batch (repo, _, _)) tree key hash =
-      let open Lwt_syntax in
       let irmin_hash =
         match hash with `Blob hash -> `Contents (hash, ()) | `Node _ as n -> n
       in
-      let* o = Store.Tree.of_hash repo irmin_hash in
+      let o = Store.Tree.of_hash repo irmin_hash in
       match o with
-      | None -> Lwt.return_none
+      | None -> None
       | Some t ->
-          let+ v = Store.Tree.add_tree tree key (t :> tree) in
+          let v = Store.Tree.add_tree tree key (t :> tree) in
           Some v
 
     let add_bytes (Batch (_, t, _)) bytes =
-      let open Lwt_syntax in
       (* Save the contents in the store *)
-      let+ _ = Store.save_contents t bytes in
+      let _ = Store.save_contents t bytes in
       Store.Tree.of_contents bytes
 
     let add_dir batch l =
@@ -1119,7 +1115,8 @@ module Make (Encoding : module type of Tezos_context_encoding.Context) = struct
       let add sub_tree (step, hash) =
         match sub_tree with
         | None -> Lwt.return_some (Store.Tree.empty ())
-        | Some sub_tree -> add_hash batch sub_tree [step] hash
+        | Some sub_tree ->
+            Lwt_eio.run_eio @@ fun () -> add_hash batch sub_tree [step] hash
       in
       let* o = Seq_es.S.fold_left add (Some (Store.Tree.empty ())) l in
       match o with
@@ -1127,11 +1124,31 @@ module Make (Encoding : module type of Tezos_context_encoding.Context) = struct
       | Some tree ->
           let (Batch (repo, x, y)) = batch in
           (* Save the node in the store ... *)
-          let*! _ = Store.save_tree ~clear:true repo x y tree in
+          let*! _ =
+            Lwt_eio.run_eio @@ fun () ->
+            Store.save_tree ~clear:true repo x y tree
+          in
           return_some tree
 
     module Commit_hash = Context_hash
     module Block_header = Block_header
+
+    (* Retro-compatibility *)
+    let checkout idx h = Lwt_eio.run_eio @@ fun () -> checkout idx h
+
+    let set_context ~info ~parents ctx h =
+      Lwt_eio.run_eio @@ fun () -> set_context ~info ~parents ctx h
+
+    let add_bytes batch value =
+      Lwt_eio.run_eio @@ fun () -> add_bytes batch value
+
+    let tree_iteri_unique ?on_disk index f tree =
+      Lwt_eio.run_eio @@ fun () ->
+      let f snapshot = Lwt_eio.run_lwt @@ fun () -> f snapshot in
+      tree_iteri_unique ?on_disk index f tree
+
+    let save_inode idx import snapshot =
+      Lwt_eio.run_eio @@ fun () -> save_inode idx import snapshot
   end
 
   (* Context dumper *)
@@ -1148,4 +1165,36 @@ module Make (Encoding : module type of Tezos_context_encoding.Context) = struct
       ~fd
       ~nb_context_elements
       ~progress_display_mode
+
+  (* Retro-compatibility *)
+  let checkout idx h = Lwt_eio.run_eio @@ fun () -> checkout idx h
+
+  let close index = Lwt_eio.run_eio @@ fun () -> close index
+
+  let merkle_tree t leaf_kind key =
+    Lwt_eio.run_eio @@ fun () -> merkle_tree t leaf_kind key
+
+  let exists index key = Lwt_eio.run_eio @@ fun () -> exists index key
+
+  let checkout_exn index key =
+    Lwt_eio.run_eio @@ fun () -> checkout_exn index key
+
+  let gc index context_hash = Lwt_eio.run_eio @@ fun () -> gc index context_hash
+
+  let wait_gc_completion index =
+    Lwt_eio.run_eio @@ fun () -> wait_gc_completion index
+
+  let export_snapshot index context_hash ~path =
+    Lwt_eio.run_eio @@ fun () -> export_snapshot index context_hash ~path
+
+  let set_head index chain_id commit =
+    Lwt_eio.run_eio @@ fun () -> set_head index chain_id commit
+
+  let set_master index commit =
+    Lwt_eio.run_eio @@ fun () -> set_master index commit
+
+  let clear_test_chain index chain_id =
+    Lwt_eio.run_eio @@ fun () -> clear_test_chain index chain_id
+
+  let sync index = Lwt_eio.run_eio @@ fun () -> sync index
 end

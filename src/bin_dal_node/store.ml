@@ -41,9 +41,11 @@ let info message =
   let date = Unix.gettimeofday () |> int_of_float |> Int64.of_int in
   Info.v ~author:"DAL Node" ~message date
 
-let set ~msg store path v = set_exn store path v ~info:(fun () -> info msg)
+let set ~msg store path v =
+  Lwt_eio.run_eio @@ fun () -> set_exn store path v ~info:(fun () -> info msg)
 
-let remove ~msg store path = remove_exn store path ~info:(fun () -> info msg)
+let remove ~msg store path =
+  Lwt_eio.run_eio @@ fun () -> remove_exn store path ~info:(fun () -> info msg)
 
 module Shards = struct
   include Key_value_store
@@ -127,8 +129,10 @@ let init gs_worker config =
   let open Lwt_result_syntax in
   let base_dir = Configuration.data_dir_path config path in
   let shards_watcher = Lwt_watcher.create_input () in
-  let*! repo = Repo.v (Irmin_pack.config base_dir) in
-  let*! store = main repo in
+  let*! repo =
+    Lwt_eio.run_eio @@ fun () -> Repo.v (Irmin_pack.config base_dir)
+  in
+  let*! store = Lwt_eio.run_eio @@ fun () -> main repo in
   let shard_store = Shards.init base_dir shard_store_dir in
   let*! () = Event.(emit store_is_ready ()) in
   return
@@ -345,8 +349,8 @@ module Legacy = struct
     let store = node_store.store in
     let header_path = Path.Commitment.header commitment slot_id in
     let levels_path = Path.Level.other_header_status slot_id commitment in
-    let* known_levels = mem store levels_path in
-    let* known_header = mem store header_path in
+    let* known_levels = Lwt_eio.run_eio @@ fun () -> mem store levels_path in
+    let* known_header = Lwt_eio.run_eio @@ fun () -> mem store header_path in
     (* An invariant that should hold for the storage. *)
     assert (known_levels = known_header) ;
     if known_levels then return_unit
@@ -374,13 +378,13 @@ module Legacy = struct
   let exists_slot_by_commitment node_store cryptobox commitment =
     let Cryptobox.{slot_size; _} = Cryptobox.parameters cryptobox in
     let path = Path.Commitment.slot commitment ~slot_size in
-    mem node_store.store path
+    Lwt_eio.run_eio @@ fun () -> mem node_store.store path
 
   let find_slot_by_commitment node_store cryptobox commitment =
     let open Lwt_result_syntax in
     let Cryptobox.{slot_size; _} = Cryptobox.parameters cryptobox in
     let path = Path.Commitment.slot commitment ~slot_size in
-    let*! res_opt = find node_store.store path in
+    let*! res_opt = Lwt_eio.run_eio @@ fun () -> find node_store.store path in
     Option.fold
       ~none:(return None)
       ~some:(fun v ->
@@ -588,7 +592,9 @@ module Legacy = struct
         if S.mem slot_index attested then
           set ~msg store status_path attested_str
         else
-          let* old_data_opt = find store status_path in
+          let* old_data_opt =
+            Lwt_eio.run_eio @@ fun () -> find store status_path
+          in
           if Option.is_some old_data_opt then
             set ~msg store status_path unattested_str
           else
@@ -607,6 +613,10 @@ module Legacy = struct
       ~number_of_slots
       store
       attested
+
+  let find store path = Lwt_eio.run_eio @@ fun () -> find store path
+
+  let list store path = Lwt_eio.run_eio @@ fun () -> list store path
 
   let get_commitment_by_published_level_and_index ~level ~slot_index node_store
       =

@@ -85,36 +85,35 @@ module Make_tree (Conf : Conf) (Store : DB) = struct
     match Store.Tree.destruct t with `Contents _ -> `Value | `Node _ -> `Tree
 
   let to_value t =
-    let open Lwt_syntax in
     match Store.Tree.destruct t with
     | `Contents (c, _) ->
-        let+ v = Store.Tree.Contents.force_exn c in
-        Some v
+        let v = Store.Tree.Contents.force_exn c in
+        Lwt.return (Some v)
     | `Node _ -> Lwt.return_none
 
   let of_value _ v = Store.Tree.add (Store.Tree.empty ()) [] v
 
   let fold ?depth t k ~(order : [`Sorted | `Undefined]) ~init ~f =
-    let open Lwt_syntax in
-    let* o = find_tree t k in
+    let o = find_tree t k in
     match o with
     | None -> Lwt.return init
     | Some t ->
         let order =
           (order :> [`Random of Random.State.t | `Sorted | `Undefined])
         in
-        Store.Tree.fold
-          ?depth
-          ~force:`True
-          ~cache:false
-          ~uniq:`False
-          ~order
-          ~tree:(fun k t acc ->
-            match kind t with
-            | `Value -> if k = [] then Lwt.return acc else f k t acc
-            | `Tree -> f k t acc)
-          t
-          init
+        Lwt.return
+        @@ Store.Tree.fold
+             ?depth
+             ~force:`True
+             ~cache:false
+             ~uniq:`False
+             ~order
+             ~tree:(fun k t acc ->
+               match kind t with
+               | `Value -> if k = [] then acc else f k t acc
+               | `Tree -> f k t acc)
+             t
+             init
 
   type raw = [`Value of bytes | `Tree of raw String.Map.t]
 
@@ -135,8 +134,8 @@ module Make_tree (Conf : Conf) (Store : DB) = struct
           v
 
   let to_raw t =
-    let open Lwt_syntax in
-    let+ c = Store.Tree.to_concrete t in
+    Lwt_eio.run_eio @@ fun () ->
+    let c = Store.Tree.to_concrete t in
     raw_of_concrete (fun t -> t) c
 
   let rec concrete_of_raw : type a. (concrete -> a) -> raw -> a =
@@ -201,7 +200,9 @@ module Make_tree (Conf : Conf) (Store : DB) = struct
       let prng_state = Lazy.force prng_state in
       String.init 64 (fun _ -> Char.chr (Random.State.int prng_state 256))
     in
-    fun () -> Store.Repo.v @@ Irmin_pack.config @@ random_store_name ()
+    fun () ->
+      Lwt_eio.run_eio @@ fun () ->
+      Store.Repo.v @@ Irmin_pack.config @@ random_store_name ()
 
   let kinded_key t =
     match Store.Tree.key t with
@@ -221,36 +222,63 @@ module Make_tree (Conf : Conf) (Store : DB) = struct
   exception Context_dangling_hash of string
 
   let find_tree tree key =
-    Lwt.catch
-      (fun () -> Store.Tree.find_tree tree key)
-      (function
-        | Store.Backend.Node.Val.Dangling_hash {context; hash}
-        | Store.Tree.Dangling_hash {context; hash} ->
-            let str =
-              Fmt.str
-                "%s encountered dangling hash %a"
-                context
-                (Irmin.Type.pp Hash.t)
-                hash
-            in
-            raise (Context_dangling_hash str)
-        | exn -> raise exn)
+    try Store.Tree.find_tree tree key
+    with
+    | Store.Backend.Node.Val.Dangling_hash {context; hash}
+    | Store.Tree.Dangling_hash {context; hash}
+    ->
+      let str =
+        Fmt.str
+          "%s encountered dangling hash %a"
+          context
+          (Irmin.Type.pp Hash.t)
+          hash
+      in
+      raise (Context_dangling_hash str)
 
   let add_tree tree key value =
-    Lwt.catch
-      (fun () -> Store.Tree.add_tree tree key value)
-      (function
-        | Store.Backend.Node.Val.Dangling_hash {context; hash}
-        | Store.Tree.Dangling_hash {context; hash} ->
-            let str =
-              Fmt.str
-                "%s encountered dangling hash %a"
-                context
-                (Irmin.Type.pp Hash.t)
-                hash
-            in
-            raise (Context_dangling_hash str)
-        | exn -> raise exn)
+    try Store.Tree.add_tree tree key value
+    with
+    | Store.Backend.Node.Val.Dangling_hash {context; hash}
+    | Store.Tree.Dangling_hash {context; hash}
+    ->
+      let str =
+        Fmt.str
+          "%s encountered dangling hash %a"
+          context
+          (Irmin.Type.pp Hash.t)
+          hash
+      in
+      raise (Context_dangling_hash str)
+
+  (* Retro-compatiblity *)
+
+  let mem tree path = Lwt_eio.run_eio @@ fun () -> mem tree path
+
+  let mem_tree tree path = Lwt_eio.run_eio (fun () -> mem_tree tree path)
+
+  let find tree path = Lwt_eio.run_eio (fun () -> find tree path)
+
+  let find_tree tree path = Lwt_eio.run_eio (fun () -> find_tree tree path)
+
+  let list tree ?offset ?length path =
+    Lwt_eio.run_eio (fun () -> list tree ?offset ?length path)
+
+  let length tree path = Lwt_eio.run_eio (fun () -> length tree path)
+
+  let add tree path contents =
+    Lwt_eio.run_eio (fun () -> add tree path contents)
+
+  let add_tree tree path child =
+    Lwt_eio.run_eio (fun () -> add_tree tree path child)
+
+  let remove tree path = Lwt_eio.run_eio (fun () -> remove tree path)
+
+  let fold ?depth tree path ~order ~init ~f =
+    fold ?depth tree path ~order ~init ~f:(fun path tree acc ->
+        Lwt_eio.run_lwt @@ fun () -> f path tree acc)
+
+  let of_value k v = Lwt_eio.run_eio @@ fun () -> of_value k v
 end
 
 module Proof_encoding = Tezos_context_merkle_proof_encoding
@@ -362,26 +390,32 @@ struct
   end
 
   let produce_tree_proof repo key f =
-    let open Lwt_syntax in
+    Lwt_eio.run_eio @@ fun () ->
+    let f tree = Lwt_eio.run_lwt @@ fun () -> f tree in
     let key =
       match key with `Node n -> `Node n | `Value v -> `Contents (v, ())
     in
-    let+ p, r = Store.Tree.produce_proof repo key f in
+    let p, r = Store.Tree.produce_proof repo key f in
     (Proof.to_tree p, r)
 
   let verify_tree_proof proof f =
+    Lwt_eio.run_eio @@ fun () ->
+    let f tree = Lwt_eio.run_lwt @@ fun () -> f tree in
     let proof = Proof.of_tree proof in
     Store.Tree.verify_proof proof f
 
   let produce_stream_proof repo key f =
-    let open Lwt_syntax in
+    Lwt_eio.run_eio @@ fun () ->
+    let f tree = Lwt_eio.run_lwt @@ fun () -> f tree in
     let key =
       match key with `Node n -> `Node n | `Value v -> `Contents (v, ())
     in
-    let+ p, r = Store.Tree.produce_stream repo key f in
+    let p, r = Store.Tree.produce_stream repo key f in
     (Proof.to_stream p, r)
 
   let verify_stream_proof proof f =
+    Lwt_eio.run_eio @@ fun () ->
+    let f tree = Lwt_eio.run_lwt @@ fun () -> f tree in
     let proof = Proof.of_stream proof in
     Store.Tree.verify_stream proof f
 end
