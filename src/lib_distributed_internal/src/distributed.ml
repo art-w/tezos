@@ -66,7 +66,7 @@ module Node_id_seeded_hash_type = struct
     (Node_id.get_ip n1, Node_id.get_port n1)
     = (Node_id.get_ip n2, Node_id.get_port n2)
 
-  let hash (seed : int) (n : t) : int =
+  let seeded_hash (seed : int) (n : t) : int =
     Hashtbl.seeded_hash seed (Node_id.get_ip n, Node_id.get_port n)
 end
 
@@ -115,7 +115,7 @@ module Process_id_seeed_hash_type = struct
 
     (p1_ip, p1_port, p1_id) = (p2_ip, p2_port, p2_id)
 
-  let hash (seed : int) (p : t) : int =
+  let seeded_hash (seed : int) (p : t) : int =
     let p_ip = Node_id.get_ip @@ Process_id.get_node p in
     let p_port = Node_id.get_port @@ Process_id.get_node p in
     let p_id = Process_id.get_id p in
